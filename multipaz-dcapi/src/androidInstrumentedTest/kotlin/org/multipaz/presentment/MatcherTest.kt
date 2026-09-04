@@ -20,6 +20,9 @@ import org.multipaz.cbor.Tstr
 import org.multipaz.cbor.addCborArray
 import org.multipaz.cbor.addCborMap
 import org.multipaz.cbor.buildCborArray
+import org.multipaz.cbor.buildCborMap
+import org.multipaz.cbor.putCborArray
+import org.multipaz.cbor.putCborMap
 import org.multipaz.cbor.toDataItem
 import org.multipaz.cbor.toDataItemFullDate
 import org.multipaz.crypto.Algorithm
@@ -301,6 +304,230 @@ class MatcherTest {
                     Older than 21 years: true
                     Photo of holder: 5318 bytes
                 """.trimIndent().trim() + "\n",
+            matcherResult
+        )
+    }
+
+    /**
+     * A wallet may register a credential with its type only, carrying no claims at all. EUDI
+     * wallets are required to register this way by Commission Implementing Regulation (EU)
+     * 2026/1731 (ADD-API-01): the wallet discloses the presence of the stored attestations' types
+     * to the mediating API but "shall not disclose the attributes and their values", a restriction
+     * that holds even for attestation selection.
+     *
+     * Such a credential must still be offered, matched on the metadata it did disclose (exchange
+     * protocol, docType/vct, issuer and reader identifiers). It carries no attribute fields, only
+     * the placeholder that stands in for them — the picker drops an entry that has no fields at
+     * all, so the placeholder is what keeps the credential selectable. Claim evaluation is left to
+     * the wallet, which re-runs it against the real document after the user picks an entry. A
+     * credential that does carry claims keeps the existing claim-level behaviour, so wallets that
+     * register attributes are unaffected.
+     *
+     * Both ways of expressing "no attributes" are covered: leaving "namespaces" out entirely,
+     * and registering it as an empty map.
+     */
+    @Test
+    fun testMatcher_typeOnlyRegistration_offeredWithoutAttributes() = runTest {
+        val protocol = "openid4vp-v1-unsigned"
+
+        val credentialDatabase = buildCborMap {
+            putCborArray("protocols") { add(protocol) }
+            putCborArray("credentials") {
+                // Type only: "namespaces" left out entirely.
+                addCborMap {
+                    put("title", "mDL type-only")
+                    put("subtitle", "Test App")
+                    put("bitmap", byteArrayOf())
+                    putCborArray("protocols") { add(protocol) }
+                    putCborMap("mdoc") {
+                        put("documentId", "doc-type-only")
+                        put("docType", DrivingLicense.MDL_DOCTYPE)
+                    }
+                }
+                // Type only, expressed as an empty "namespaces" map.
+                addCborMap {
+                    put("title", "mDL empty namespaces")
+                    put("subtitle", "Test App")
+                    put("bitmap", byteArrayOf())
+                    putCborArray("protocols") { add(protocol) }
+                    putCborMap("mdoc") {
+                        put("documentId", "doc-empty-namespaces")
+                        put("docType", DrivingLicense.MDL_DOCTYPE)
+                        putCborMap("namespaces") {}
+                    }
+                }
+                // Control: same docType, registered the existing way with a claim.
+                addCborMap {
+                    put("title", "mDL with claims")
+                    put("subtitle", "Test App")
+                    put("bitmap", byteArrayOf())
+                    putCborArray("protocols") { add(protocol) }
+                    putCborMap("mdoc") {
+                        put("documentId", "doc-with-claims")
+                        put("docType", DrivingLicense.MDL_DOCTYPE)
+                        putCborMap("namespaces") {
+                            putCborMap(DrivingLicense.MDL_NAMESPACE) {
+                                putCborArray("family_name") {
+                                    add("Family name")
+                                    add("Andersen")
+                                    add("Andersen")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val dcql = """
+            {
+              "credentials": [{
+                  "id": "mDL",
+                  "format": "mso_mdoc",
+                  "meta": { "doctype_value": "${DrivingLicense.MDL_DOCTYPE}" },
+                  "claims": [
+                    { "path": ["${DrivingLicense.MDL_NAMESPACE}", "family_name"] }
+            ]}]}
+        """.trimIndent().trim()
+
+        val request = buildJsonObject {
+            putJsonArray("requests") {
+                addJsonObject {
+                    put("protocol", protocol)
+                    putJsonObject("data") {
+                        put("nonce", "nonce")
+                        put("client_id", CLIENT_ID)
+                        put("dcql_query", Json.parseToJsonElement(dcql))
+                    }
+                }
+            }
+        }
+
+        val matcherResult = runMatcher(
+            request = request.toString().encodeToByteArray(),
+            credentialDatabase = Cbor.encode(credentialDatabase)
+        )
+
+        Assert.assertEquals(
+            """
+                Set
+                  set_id 0 $protocol
+                  SetEntry set_index 0
+                    cred_id 0 $protocol doc-type-only
+                    Requested attributes: shown in the wallet
+                  SetEntry set_index 0
+                    cred_id 0 $protocol doc-empty-namespaces
+                    Requested attributes: shown in the wallet
+                  SetEntry set_index 0
+                    cred_id 0 $protocol doc-with-claims
+                    Family name: Andersen
+            """.trimIndent().trim() + "\n",
+            matcherResult
+        )
+    }
+
+    /**
+     * The SD-JWT VC counterpart of [testMatcher_typeOnlyRegistration_offeredWithoutAttributes]:
+     * leaving "claims" out of an sdjwt registration, or registering it as an empty map, declares
+     * the credential's vct without its claims. Such a credential must still be offered, matched on
+     * the vct alone and carrying only the placeholder in place of attribute fields, while a
+     * credential that does carry claims keeps the existing claim-level behaviour.
+     */
+    @Test
+    fun testMatcher_typeOnlyRegistration_sdJwt_offeredWithoutAttributes() = runTest {
+        val protocol = "openid4vp-v1-unsigned"
+        val vct = "urn:eudi:pid:1"
+
+        val credentialDatabase = buildCborMap {
+            putCborArray("protocols") { add(protocol) }
+            putCborArray("credentials") {
+                // Type only: "claims" left out entirely.
+                addCborMap {
+                    put("title", "PID type-only")
+                    put("subtitle", "Test App")
+                    put("bitmap", byteArrayOf())
+                    putCborArray("protocols") { add(protocol) }
+                    putCborMap("sdjwt") {
+                        put("documentId", "doc-type-only")
+                        put("vct", vct)
+                    }
+                }
+                // Type only, expressed as an empty "claims" map.
+                addCborMap {
+                    put("title", "PID empty claims")
+                    put("subtitle", "Test App")
+                    put("bitmap", byteArrayOf())
+                    putCborArray("protocols") { add(protocol) }
+                    putCborMap("sdjwt") {
+                        put("documentId", "doc-empty-claims")
+                        put("vct", vct)
+                        putCborMap("claims") {}
+                    }
+                }
+                // Control: same vct, registered the existing way with a claim.
+                addCborMap {
+                    put("title", "PID with claims")
+                    put("subtitle", "Test App")
+                    put("bitmap", byteArrayOf())
+                    putCborArray("protocols") { add(protocol) }
+                    putCborMap("sdjwt") {
+                        put("documentId", "doc-with-claims")
+                        put("vct", vct)
+                        putCborMap("claims") {
+                            putCborArray("family_name") {
+                                add("Family name")
+                                add("Andersen")
+                                add("Andersen")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val dcql = """
+            {
+              "credentials": [{
+                  "id": "pid",
+                  "format": "dc+sd-jwt",
+                  "meta": { "vct_values": ["$vct"] },
+                  "claims": [
+                    { "path": ["family_name"] }
+            ]}]}
+        """.trimIndent().trim()
+
+        val request = buildJsonObject {
+            putJsonArray("requests") {
+                addJsonObject {
+                    put("protocol", protocol)
+                    putJsonObject("data") {
+                        put("nonce", "nonce")
+                        put("client_id", CLIENT_ID)
+                        put("dcql_query", Json.parseToJsonElement(dcql))
+                    }
+                }
+            }
+        }
+
+        val matcherResult = runMatcher(
+            request = request.toString().encodeToByteArray(),
+            credentialDatabase = Cbor.encode(credentialDatabase)
+        )
+
+        Assert.assertEquals(
+            """
+                Set
+                  set_id 0 $protocol
+                  SetEntry set_index 0
+                    cred_id 0 $protocol doc-type-only
+                    Requested attributes: shown in the wallet
+                  SetEntry set_index 0
+                    cred_id 0 $protocol doc-empty-claims
+                    Requested attributes: shown in the wallet
+                  SetEntry set_index 0
+                    cred_id 0 $protocol doc-with-claims
+                    Family name: Andersen
+            """.trimIndent().trim() + "\n",
             matcherResult
         )
     }

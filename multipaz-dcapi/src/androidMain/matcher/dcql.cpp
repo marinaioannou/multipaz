@@ -283,6 +283,22 @@ std::optional<DcqlResponse> DcqlQuery::execute(CredentialDatabase* credentialDat
 
         std::vector<DcqlResponseCredentialSetOptionMemberMatch> matches;
         for (auto& cred : credsSatifyingMeta) {
+            // Type-only registration: the credential was registered with its type only,
+            // carrying no claims. EUDI wallets are required to register this way by
+            // Commission Implementing Regulation (EU) 2026/1731 (ADD-API-01), which
+            // forbids disclosing the attributes and their values to the mediating API,
+            // explicitly including for attestation selection. Match on the metadata that
+            // was disclosed (docType/vct, protocol, issuer/reader identifiers) and leave
+            // claim evaluation to the wallet, which re-runs it against the real document
+            // after the user picks an entry. Credentials that do carry claims are
+            // unaffected and keep the existing claim-level behaviour.
+            if (cred->claims.empty()) {
+                matches.push_back(DcqlResponseCredentialSetOptionMemberMatch(
+                        cred,
+                        std::vector<Claim*>()
+                ));
+                continue;
+            }
             if (query.claimSets.size() == 0) {
                 if (query.lenientClaimMatching) {
                     auto matchingClaimValues = std::vector<Claim*>();

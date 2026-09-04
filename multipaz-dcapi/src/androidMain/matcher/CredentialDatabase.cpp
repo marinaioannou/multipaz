@@ -77,20 +77,28 @@ CredentialDatabase::CredentialDatabase(const uint8_t* encodedDatabase, size_t en
                 }
             }
 
-            auto namespaces = mdoc->get("namespaces")->asMap();
-            for (auto j = namespaces->begin(); j != namespaces->end(); ++j) {
-                auto namespaceName = j->first->asTstr()->value();
-                auto dataElementsMap = j->second->asMap();
+            // Optional: leaving out "namespaces" registers the credential's type without its
+            // attributes. EUDI wallets are required to register this way by Commission
+            // Implementing Regulation (EU) 2026/1731 (ADD-API-01), which forbids disclosing the
+            // attributes and their values to the mediating API. Such a credential is matched on
+            // its metadata alone, see DcqlQuery::execute().
+            const auto& namespacesPtr = mdoc->get("namespaces");
+            if (namespacesPtr != nullptr && namespacesPtr->asMap() != nullptr) {
+                auto namespaces = namespacesPtr->asMap();
+                for (auto j = namespaces->begin(); j != namespaces->end(); ++j) {
+                    auto namespaceName = j->first->asTstr()->value();
+                    auto dataElementsMap = j->second->asMap();
 
-                for (auto k = dataElementsMap->begin(); k != dataElementsMap->end(); ++k) {
-                    auto dataElementName = k->first->asTstr()->value();
-                    auto dataElementDetailsArray = k->second->asArray();
-                    auto displayName = dataElementDetailsArray->get(0)->asTstr()->value();
-                    auto value = dataElementDetailsArray->get(1)->asTstr()->value();
-                    auto matchValue = dataElementDetailsArray->get(2)->asTstr()->value();
+                    for (auto k = dataElementsMap->begin(); k != dataElementsMap->end(); ++k) {
+                        auto dataElementName = k->first->asTstr()->value();
+                        auto dataElementDetailsArray = k->second->asArray();
+                        auto displayName = dataElementDetailsArray->get(0)->asTstr()->value();
+                        auto value = dataElementDetailsArray->get(1)->asTstr()->value();
+                        auto matchValue = dataElementDetailsArray->get(2)->asTstr()->value();
 
-                    auto combinedName = namespaceName + "." + dataElementName;
-                    resultingClaims[combinedName] = Claim(combinedName, displayName, value, matchValue);
+                        auto combinedName = namespaceName + "." + dataElementName;
+                        resultingClaims[combinedName] = Claim(combinedName, displayName, value, matchValue);
+                    }
                 }
             }
         }
@@ -121,15 +129,20 @@ CredentialDatabase::CredentialDatabase(const uint8_t* encodedDatabase, size_t en
                 }
             }
 
-            auto claims = sdjwt->get("claims")->asMap();
-            for (auto j = claims->begin(); j != claims->end(); ++j) {
-                auto claimName = j->first->asTstr()->value();
-                auto claimDetailsArray = j->second->asArray();
-                auto displayName = claimDetailsArray->get(0)->asTstr()->value();
-                auto value = claimDetailsArray->get(1)->asTstr()->value();
-                auto matchValue = claimDetailsArray->get(2)->asTstr()->value();
+            // Optional, mirroring "namespaces" above: leaving out "claims" registers the
+            // credential's type without its claims.
+            const auto& claimsPtr = sdjwt->get("claims");
+            if (claimsPtr != nullptr && claimsPtr->asMap() != nullptr) {
+                auto claims = claimsPtr->asMap();
+                for (auto j = claims->begin(); j != claims->end(); ++j) {
+                    auto claimName = j->first->asTstr()->value();
+                    auto claimDetailsArray = j->second->asArray();
+                    auto displayName = claimDetailsArray->get(0)->asTstr()->value();
+                    auto value = claimDetailsArray->get(1)->asTstr()->value();
+                    auto matchValue = claimDetailsArray->get(2)->asTstr()->value();
 
-                resultingClaims[claimName] = Claim(claimName, displayName, value, matchValue);
+                    resultingClaims[claimName] = Claim(claimName, displayName, value, matchValue);
+                }
             }
         }
 
@@ -222,6 +235,29 @@ void Combination::addToCredmanPicker(const Request& request) const {
                         nullptr,
                         nullptr
                 );
+            }
+
+            // A type-only registration carries no claims, so this entry would otherwise be
+            // added with no fields at all — and the Credential Manager picker silently drops a
+            // field-less entry, leaving the credential invisible even though it matched.
+            // Verified on Android 16. Emit a single placeholder instead: it names no attribute
+            // and carries no value, so nothing about the attributes is disclosed to the
+            // mediating API, while the entry becomes selectable. The wallet shows the user what
+            // is actually requested after the entry is picked.
+            if (match.claims.empty()) {
+                if (credmanRuntimeVersion >= 2) {
+                    ::AddFieldToEntrySet(entryId,
+                                         strdup("Requested attributes"),
+                                         strdup("shown in the wallet"),
+                                         setId,
+                                         setIndex
+                    );
+                } else {
+                    ::AddFieldForStringIdEntry(entryId,
+                                               strdup("Requested attributes"),
+                                               strdup("shown in the wallet")
+                    );
+                }
             }
 
             for (const auto &claim: match.claims) {
