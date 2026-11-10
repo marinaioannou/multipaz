@@ -16,12 +16,17 @@
 package org.multipaz.securearea
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import org.multipaz.crypto.Algorithm
 import org.multipaz.crypto.EcPublicKey
 import org.multipaz.crypto.SecretKey
 import org.multipaz.crypto.SecureByteString
 import org.multipaz.crypto.Signature
 import org.multipaz.prompt.Reason
+import org.multipaz.util.Logger
+
+private const val TAG = "SecureArea"
 
 /**
  * An interface to a Secure Area.
@@ -98,6 +103,7 @@ interface SecureArea {
      * can be requested by specific implementations through specializations of the [CreateKeySettings] class.
      *
      * The default implementation just calls [createKey] in sequence without generating an OpenID4VCI attestation.
+     * If creating a key fails, it deletes the keys it already created.
      *
      * @param numKeys number of keys to create.
      * @param createKeySettings the settings for the keys to create.
@@ -110,8 +116,25 @@ interface SecureArea {
     )
     suspend fun batchCreateKey(numKeys: Int, createKeySettings: CreateKeySettings): BatchCreateKeyResult {
         val keyInfos = mutableListOf<KeyInfo>()
-        for (n in 1..numKeys) {
-            keyInfos.add(createKey(null, createKeySettings))
+        var created = false
+        try {
+            for (n in 1..numKeys) {
+                keyInfos.add(createKey(null, createKeySettings))
+            }
+            created = true
+        } finally {
+            if (!created) {
+                withContext(NonCancellable) {
+                    for (keyInfo in keyInfos) {
+                        try {
+                            deleteKey(keyInfo.alias)
+                        } catch (deleteError: Exception) {
+                            if (deleteError is CancellationException) throw deleteError
+                            Logger.w(TAG, "Error deleting key after failed batch key creation", deleteError)
+                        }
+                    }
+                }
+            }
         }
         return BatchCreateKeyResult(
             keyInfos = keyInfos,

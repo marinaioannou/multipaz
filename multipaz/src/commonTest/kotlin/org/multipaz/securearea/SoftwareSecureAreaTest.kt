@@ -28,12 +28,17 @@ import org.multipaz.securearea.software.SoftwareKeyUnlockData
 import org.multipaz.securearea.software.SoftwareSecureArea
 import org.multipaz.securearea.software.SoftwareUserAuthType
 import org.multipaz.storage.ephemeral.EphemeralStorage
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.multipaz.prompt.Reason
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -526,6 +531,89 @@ class SoftwareSecureAreaTest {
                 signature
             )
         }
+    }
+
+    @Test
+    fun testBatchCreateKeyDeletesCreatedKeysOnFailure() = runTest {
+        val sa = FailingSecureArea(SoftwareSecureArea.create(EphemeralStorage()), failingKeyNumber = 3)
+        assertFailsWith<IllegalStateException> {
+            sa.batchCreateKey(5, CreateKeySettings(algorithm = Algorithm.ESP256))
+        }
+        assertEquals(2, sa.createdAliases.size)
+        for (alias in sa.createdAliases) {
+            assertFailsWith<IllegalArgumentException> { sa.getKeyInfo(alias) }
+        }
+    }
+
+    @Test
+    fun testBatchCreateKeyDeletesOtherKeysWhenDeletingOneFails() = runTest {
+        val sa = FailingSecureArea(
+            SoftwareSecureArea.create(EphemeralStorage()),
+            failingKeyNumber = 3,
+            failingDeleteKeyNumber = 1
+        )
+        val e = assertFailsWith<IllegalStateException> {
+            sa.batchCreateKey(5, CreateKeySettings(algorithm = Algorithm.ESP256))
+        }
+        assertEquals("Key creation failed", e.message)
+        assertEquals(sa.createdAliases[0], sa.getKeyInfo(sa.createdAliases[0]).alias)
+        assertFailsWith<IllegalArgumentException> { sa.getKeyInfo(sa.createdAliases[1]) }
+    }
+
+    @Test
+    fun testBatchCreateKeyDeletesCreatedKeysOnCancellation() = runTest {
+        val sa = FailingSecureArea(
+            SoftwareSecureArea.create(EphemeralStorage()),
+            failingKeyNumber = 3,
+            cancelInsteadOfFailing = true
+        )
+        val job = launch { sa.batchCreateKey(5, CreateKeySettings(algorithm = Algorithm.ESP256)) }
+        job.join()
+        assertTrue(job.isCancelled)
+        assertEquals(2, sa.createdAliases.size)
+        for (alias in sa.createdAliases) {
+            assertFailsWith<IllegalArgumentException> { sa.getKeyInfo(alias) }
+        }
+    }
+
+    /**
+     * A [SecureArea] that fails to create its [failingKeyNumber]th key, or cancels the coroutine there if
+     * [cancelInsteadOfFailing] is set, fails to delete its [failingDeleteKeyNumber]th key, and uses the
+     * default implementation of [SecureArea.batchCreateKey].
+     *
+     * Like a Secure Area that deletes keys on another dispatcher, [deleteKey] fails in a cancelled coroutine.
+     */
+    private class FailingSecureArea(
+        private val delegate: SecureArea,
+        private val failingKeyNumber: Int,
+        private val failingDeleteKeyNumber: Int? = null,
+        private val cancelInsteadOfFailing: Boolean = false
+    ) : SecureArea by delegate {
+        val createdAliases = mutableListOf<String>()
+        private var keyNumber = 0
+
+        override suspend fun createKey(alias: String?, createKeySettings: CreateKeySettings): KeyInfo {
+            keyNumber++
+            if (keyNumber == failingKeyNumber) {
+                if (cancelInsteadOfFailing) {
+                    currentCoroutineContext().cancel()
+                    currentCoroutineContext().ensureActive()
+                }
+                throw IllegalStateException("Key creation failed")
+            }
+            return delegate.createKey(alias, createKeySettings).also { createdAliases.add(it.alias) }
+        }
+
+        override suspend fun deleteKey(alias: String) {
+            currentCoroutineContext().ensureActive()
+            check(failingDeleteKeyNumber == null || alias != createdAliases[failingDeleteKeyNumber - 1]) {
+                "Key deletion failed"
+            }
+            delegate.deleteKey(alias)
+        }
+
+        override suspend fun batchCreateKey(numKeys: Int, createKeySettings: CreateKeySettings): BatchCreateKeyResult =
+            super.batchCreateKey(numKeys, createKeySettings)
     }
 
     @Test
